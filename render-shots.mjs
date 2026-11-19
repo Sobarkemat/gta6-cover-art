@@ -1,35 +1,43 @@
-// Renders screenshots/ from the running app with headless Chromium (Playwright's headless
-// shell). Serves app/ on a local port, opens each scene from shots.json, waits for the app to
-// signal it has painted (window.__shotReady), and saves a JPEG within the gate's limits.
-//   node render-shots.mjs
+// Renders the four screenshots in shots.json with headless Chromium and
+// writes them to screenshots/. Serves app/ over HTTP first, then opens one
+// page per shot with ?shot=<scene>&views=<framing> and screenshots the
+// viewport. Usage: node render-shots.mjs
+//
+// Needs Playwright's headless shell (already in ~/.cache/ms-playwright/).
+// Install once if missing: npx playwright install chromium --with-deps
+
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-const { chromium } = require('/home/hatch/workspace/makefun/playtest/node_modules/playwright-core');
+import { chromium } from 'playwright-core';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
-const appRoot = join(here, 'app');
-const shots = JSON.parse(readFileSync(join(here, 'shots.json'), 'utf8'));
+const appDir = join(here, 'app');
+const outDir = join(here, 'screenshots');
+const shots = JSON.parse(readFileSync(join(here, 'shots.json'), 'utf8')).shots;
 
 const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html',
+  '.css': 'text/css',
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
   '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
   '.ttf': 'font/ttf',
-  '.txt': 'text/plain; charset=utf-8',
+  '.txt': 'text/plain',
 };
 
-const server = createServer((req, res) => {
-  const path = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
-  const file = join(appRoot, path === '/' ? 'index.html' : path);
+const server = createServer(async (req, res) => {
   try {
-    const data = readFileSync(file);
-    res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' });
+    const url = new URL(req.url, 'http://localhost');
+    let path = decodeURIComponent(url.pathname);
+    if (path === '/') path = '/index.html';
+    const file = join(appDir, path);
+    const data = await readFile(file);
+    res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream' });
     res.end(data);
   } catch {
     res.writeHead(404);
@@ -40,21 +48,25 @@ const server = createServer((req, res) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const port = server.address().port;
 
-const browser = await chromium.launch({
-  executablePath: '/home/hatch/.cache/ms-playwright/chromium_headless_shell-1148/chrome-linux/headless_shell',
-  args: ['--no-sandbox', '--disable-gpu'],
-});
+const executablePath = process.env.CHROME_HEADLESS_SHELL
+  || '/home/hatch/.cache/ms-playwright/chromium_headless_shell-1148/chrome-linux/headless_shell';
+const browser = await chromium.launch({ executablePath, args: ['--no-sandbox'] });
 
+mkdirSync(outDir, { recursive: true });
 for (const shot of shots) {
-  const page = await browser.newPage({ viewport: { width: shot.w, height: shot.h } });
-  page.on('console', (msg) => { if (msg.type() === 'error') console.log(`[${shot.name}] console error:`, msg.text()); });
-  page.on('pageerror', (err) => console.log(`[${shot.name}] page error:`, String(err)));
-  await page.goto(`http://127.0.0.1:${port}/index.html${shot.query}`, { waitUntil: 'load' });
-  await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
-  const outPath = join(here, 'screenshots', shot.name);
-  await page.screenshot({ path: outPath, type: 'jpeg', quality: 85 });
-  const bytes = statSync(outPath).size;
-  console.log(`${shot.name}: ${shot.w}x${shot.h}, ${bytes} bytes${bytes > 262144 ? '  <-- OVER 256 KiB!' : ''}`);
+  const page = await browser.newPage({ viewport: { width: shot.width, height: shot.height } });
+  const errors = [];
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') errors.push(msg.text());
+  });
+  page.on('pageerror', (err) => errors.push(String(err)));
+  const url = `http://127.0.0.1:${port}/index.html?shot=${shot.scene}&views=${encodeURIComponent(shot.views)}`;
+  await page.goto(url, { waitUntil: 'load' });
+  await page.waitForFunction(() => window.__shotReady === true, { timeout: 20000 });
+  await page.waitForTimeout(600);
+  const target = join(outDir, shot.file);
+  await page.screenshot({ path: target, type: 'jpeg', quality: 82 });
+  console.log(`${shot.file}: ${shot.width}x${shot.height} — ${shot.note} ${errors.length ? `console errors: ${errors.join(' | ')}` : 'no console errors'}`);
   await page.close();
 }
 

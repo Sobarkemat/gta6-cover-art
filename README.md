@@ -12,7 +12,7 @@ An offline web app that turns your own photos and a caption into GTA-style cover
 - **Six layouts** — Grid 4, Hero + 3, Full Bleed, Triple Strip, Comic 5 and Tilted Snaps, each with a white keyline frame and a title band.
 - **Six colour grades** — Vice Sunset, Neon Nights, Golden Hour, Teal Dawn, Candy Pop and Mono Noir, each a photo filter plus a sunset wash over the panels.
 - **Poster lettering** — a title in Anton with a sunset gradient, a script subtitle in Pacifico, a Bebas Neue kicker and a tilted star badge ribbon, all editable.
-- **Poster finish** — film grain, a soft vignette and a white frame around the whole cover.
+- **Poster finish** — deterministic film grain, a soft vignette and a white frame around the whole cover.
 - **Undo / redo** — Ctrl+Z / Ctrl+Y, or the buttons in the header.
 - **Fast export** — one click exports a PNG in 1080 × 1080, 1080 × 1350 or 1920 × 1080, or all three sizes at once.
 

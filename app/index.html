@@ -3,75 +3,104 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sunset Strip Cover Studio — GTA-style cover art maker</title>
-<link rel="stylesheet" href="./style.css">
+<title>Sunset Strip Cover Studio</title>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header class="topbar">
   <div class="brand">
-    <span class="brand-mark">★</span>
+    <span class="brand-mark">SS</span>
     <div>
       <h1>Sunset Strip Cover Studio</h1>
-      <p>Your photos, a Vice City sunset, one share-ready cover.</p>
+      <p>Turn your photos into GTA-style cover art. Everything runs offline.</p>
     </div>
   </div>
   <div class="top-actions">
-    <button id="undo" type="button" title="Undo (Ctrl+Z)">↩ Undo</button>
-    <button id="redo" type="button" title="Redo (Ctrl+Y)">↪ Redo</button>
+    <button id="undoBtn" type="button" title="Undo (Ctrl+Z)">Undo</button>
+    <button id="redoBtn" type="button" title="Redo (Ctrl+Y)">Redo</button>
+    <button id="fillAllBtn" type="button" title="Fill every panel with the first photo">Fill all</button>
+    <button id="resetBtn" type="button" title="Back to the sample cover">Reset</button>
   </div>
 </header>
-<main class="app">
-  <section class="controls" aria-label="Cover controls">
-    <section class="group">
-      <h2>1 · Photos</h2>
-      <p class="hint">Up to four photos, kept on your machine. Drag a panel to pan it, scroll to zoom.</p>
-      <div id="photoSlots" class="photo-slots"></div>
-      <button id="fillAll" type="button" class="wide">Fill every panel</button>
-    </section>
-    <section class="group">
-      <h2>2 · Layout</h2>
-      <div id="layoutPicker" class="picker"></div>
-    </section>
-    <section class="group">
-      <h2>3 · Colour grade</h2>
-      <div id="gradePicker" class="picker"></div>
-    </section>
-    <section class="group">
-      <h2>4 · Words</h2>
-      <label>Title <input id="titleInput" type="text" maxlength="30" value="Sunset Strip"></label>
-      <label>Subtitle <input id="subtitleInput" type="text" maxlength="48" value="Vice nights, neon lights"></label>
-      <label>Kicker <input id="kickerInput" type="text" maxlength="40" value="Leonida • Est. 2026"></label>
-      <label>Badge <input id="badgeInput" type="text" maxlength="16" value="New"></label>
-    </section>
-    <section class="group">
-      <h2>5 · Selected panel</h2>
-      <label>Panel
-        <select id="panelSelect"></select>
-      </label>
-      <label>Photo in this panel
-        <select id="panelPhoto"></select>
-      </label>
-      <label>Zoom <span id="zoomValue">100%</span>
-        <input id="panelZoom" type="range" min="1" max="4" step="0.05" value="1">
-      </label>
-      <button id="resetView" type="button" class="wide">Reset panel view</button>
-    </section>
-    <section class="group">
-      <h2>6 · Export</h2>
-      <div id="sizePicker" class="size-picker"></div>
-      <button id="exportOne" type="button" class="primary wide">Export PNG</button>
-      <button id="exportAll" type="button" class="wide">Export all three sizes</button>
-      <p id="status" role="status"></p>
-    </section>
+
+<main class="workspace">
+  <section class="stage-wrap">
+    <div class="stage" id="stage">
+      <canvas id="coverCanvas" width="1080" height="1080"></canvas>
+      <div class="stage-hint" id="stageHint">Click a panel to select it, drag to pan, scroll to zoom.</div>
+    </div>
+    <div class="size-row" role="group" aria-label="Export size">
+      <span>Export size</span>
+      <button type="button" class="size-btn is-active" data-size="1080x1080">1080 &times; 1080</button>
+      <button type="button" class="size-btn" data-size="1080x1350">1080 &times; 1350</button>
+      <button type="button" class="size-btn" data-size="1920x1080">1920 &times; 1080</button>
+      <button type="button" id="exportBtn" class="export-btn">Export PNG</button>
+      <button type="button" id="exportAllBtn" class="export-btn ghost">Export all three</button>
+    </div>
   </section>
-  <section class="preview" aria-label="Live preview">
-    <canvas id="cover" width="1080" height="1080" aria-label="The cover preview"></canvas>
-    <p class="preview-hint">Live preview — drag a panel to pan, scroll over it to zoom.</p>
-  </section>
+
+  <aside class="panel">
+    <section class="card">
+      <h2>1 &middot; Photos</h2>
+      <p class="card-note">Load up to four photos from your machine. They never leave it.</p>
+      <div class="slots" id="slots"></div>
+      <label class="zoom-label" for="zoomSlider">Selected panel zoom</label>
+      <input id="zoomSlider" type="range" min="100" max="300" value="100" step="1">
+      <div class="zoom-read"><span id="zoomRead">100%</span><button id="fitBtn" type="button">Fit panel</button></div>
+    </section>
+
+    <section class="card">
+      <h2>2 &middot; Layout &amp; grade</h2>
+      <label class="field-label" for="layoutSel">Layout</label>
+      <select id="layoutSel">
+        <option value="grid4">Grid 4</option>
+        <option value="hero3">Hero + 3</option>
+        <option value="fullbleed">Full Bleed</option>
+        <option value="triple">Triple Strip</option>
+        <option value="comic5">Comic 5</option>
+        <option value="tilted">Tilted Snaps</option>
+      </select>
+      <label class="field-label" for="gradeSel">Colour grade</label>
+      <select id="gradeSel">
+        <option value="vice">Vice Sunset</option>
+        <option value="neon">Neon Nights</option>
+        <option value="golden">Golden Hour</option>
+        <option value="teal">Teal Dawn</option>
+        <option value="candy">Candy Pop</option>
+        <option value="mono">Mono Noir</option>
+      </select>
+      <div class="swatches" id="gradeSwatches" aria-label="Grade preview"></div>
+    </section>
+
+    <section class="card">
+      <h2>3 &middot; Caption</h2>
+      <label class="field-label" for="kickerInput">Kicker</label>
+      <input id="kickerInput" type="text" value="LEONIDA &middot; VICE CITY" maxlength="60">
+      <label class="field-label" for="titleInput">Title</label>
+      <input id="titleInput" type="text" value="SUNSET STRIP" maxlength="40">
+      <label class="field-label" for="subtitleInput">Subtitle</label>
+      <input id="subtitleInput" type="text" value="two drifters, one last summer" maxlength="80">
+      <label class="field-label" for="badgeInput">Star badge</label>
+      <input id="badgeInput" type="text" value="EST. 2026" maxlength="20">
+    </section>
+
+    <section class="card howto">
+      <h2>How it works</h2>
+      <ol>
+        <li>Load photos into the four slots.</li>
+        <li>Pick a layout and a grade.</li>
+        <li>Drag a panel to pan it, scroll to zoom.</li>
+        <li>Edit the caption, then export a PNG.</li>
+      </ol>
+    </section>
+  </aside>
 </main>
-<footer class="footnote">
-  <p>Sunset Strip Cover Studio is an original fan-made tool. It is not affiliated with Rockstar Games and uses no Rockstar logo, artwork or font. Lettering: Anton, Pacifico and Bebas Neue under the SIL Open Font License (see <a href="./fonts/OFL.txt">OFL.txt</a>). Sample photos were made with an image model for make.fun and are free to use.</p>
+
+<footer class="foot">
+  <span>Sunset Strip Cover Studio is an original fan-made tool, not affiliated with Rockstar Games.</span>
+  <span>Fonts: Anton, Pacifico &amp; Bebas Neue (SIL Open Font License).</span>
 </footer>
-<script type="module" src="./src/main.js"></script>
+
+<script type="module" src="src/main.js"></script>
 </body>
 </html>
