@@ -1,17 +1,12 @@
 // Sunset Strip Cover Studio — the entry program (Node 22, standard library only).
-// The app is this directory's app/ folder: plain static files a desktop browser loads offline
-// (app/index.html and its ES modules, vendored OFL fonts, no library and no network request).
-// The program hands the app in: it copies app/ and screenshots/ from beside this file to /output
-// and writes /output/dossier.json, the summary the judge reads, with the vendored make.fun
-// library. The cover art itself is drawn by app/src/cover.js — six multi-panel layouts, six
-// Vice City / neon colour grades, Anton + Pacifico lettering, grain and vignette — and exported
-// as PNG in 1080 x 1080, 1080 x 1350 and 1920 x 1080.
-//
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
+// It hands the app in: copies this repository's app/ and screenshots/ to /output and writes
+// /output/dossier.json with the vendored make.fun library, so the gate can check the app and
+// the judge can read it. Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// The program writes the same bytes on every run: it copies files as they are and the dossier
+// is built from those files alone, so two runs agree byte for byte.
 
-import { cpSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-app.ts';
@@ -19,31 +14,54 @@ import { buildDossier } from './vendor/makefun-app.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
+// The gate's own caps (reference/gate.json): the dossier text cap shapes the bytes; the rest
+// refuse an entry the scorer would refuse, so check them here and fail loudly instead.
+const CAPS = {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  app_max_files: 993,
+  app_max_bytes: 50331648,
+  app_path_max_bytes: 1000,
+};
+
+function countAppEntries(dir) {
+  let files = 0;
+  let bytes = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    files += 1;
+    if (entry.isDirectory()) {
+      const sub = countAppEntries(path);
+      files += sub.files;
+      bytes += sub.bytes;
+    } else {
+      bytes += statSync(path).size;
+    }
+  }
+  return { files, bytes };
+}
+
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'app'), join(out, 'app'), { recursive: true });
 mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
-
-// The entry is only hand-in-ready with 3 or 4 screenshots, the first by name the cover: refuse
-// to write a dossier for an empty screenshots/ folder instead of handing in a coverless entry.
-const shots = existsSync(join(here, 'screenshots'))
-  ? readdirSync(join(here, 'screenshots')).filter((n) => !n.startsWith('.'))
-  : [];
-if (shots.length < 3 || shots.length > 4) {
-  throw new Error(`expected 3 or 4 screenshots, found ${shots.length}`);
+if (existsSync(join(here, 'screenshots'))) {
+  cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 }
 
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
-// scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in app/ or 48 MiB of app
-// files, in all, or a path under app/ over 1000 bytes: app/ counts beside /output's own 1000-entry cap, its
-// screenshots/ and dossier.json).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    app_max_files: 993,
-    app_max_bytes: 50331648,
-    app_path_max_bytes: 1000,
-  }),
-);
+const appTree = countAppEntries(join(here, 'app'));
+if (appTree.files > CAPS.app_max_files) throw new Error(`app/ has ${appTree.files} entries, over the ${CAPS.app_max_files} cap`);
+if (appTree.bytes > CAPS.app_max_bytes) throw new Error(`app/ is ${appTree.bytes} bytes, over the ${CAPS.app_max_bytes} cap`);
+const shots = readdirSync(join(here, 'screenshots')).filter((n) => !n.startsWith('.'));
+if (shots.length < 3 || shots.length > CAPS.screenshots.max) {
+  throw new Error(`screenshots/ has ${shots.length} images, need 3 or 4`);
+}
+for (const name of shots) {
+  const size = statSync(join(here, 'screenshots', name)).size;
+  if (size > CAPS.screenshots.max_bytes) throw new Error(`screenshots/${name} is ${size} bytes, over the 256 KiB cap`);
+}
+
+const dossier = buildDossier(out, CAPS);
+if (dossier.length > 1572864) throw new Error(`dossier.json is ${dossier.length} bytes, over the 1.5 MiB cap`);
+writeFileSync(join(out, 'dossier.json'), dossier);
+
+console.log(`Sunset Strip Cover Studio handed in: app/ ${appTree.files} entries, ${appTree.bytes} bytes; ${shots.length} screenshots; dossier.json ${dossier.length} bytes.`);

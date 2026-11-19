@@ -1,37 +1,60 @@
-// Fixed scenes for screenshots: ?shot=editor shows the editor with sample photos loaded;
-// ?shot=cover shows one exported cover full-frame, drawn by the app's own cover engine at the
-// export size named by ?size= (square, portrait or wide). window.__shotReady is set once painted.
-import { drawCover } from './cover.js';
+// Fixed scenes for screenshots: ?shot=cover draws the cover alone, full frame, at the size the
+// query asks for; ?shot=editor shows the whole editor with sample photos loaded.
+// Query: layout, grade, size, title, subtitle, kicker, badge, photos (comma sample names),
+// w and h (cover pixels, cover scene only). window.__shotReady is set once painted.
+import { layoutPanelsFor } from './cover.js';
 
-export async function runShot(shot, query, state, helpers) {
-  const { loadImage, fontsReady, renderPhotoSlots, syncAll, redrawNow, SAMPLES } = helpers;
-  await fontsReady();
+export async function runShot(shot, query, api) {
+  const { state } = api;
+  state.layout = query.get('layout') ?? state.layout;
+  state.grade = query.get('grade') ?? state.grade;
+  state.size = query.get('size') ?? state.size;
+  state.title = query.get('title') ?? state.title;
+  state.subtitle = query.get('subtitle') ?? state.subtitle;
+  state.kicker = query.get('kicker') ?? state.kicker;
+  state.badge = query.get('badge') ?? state.badge;
 
-  const photoA = query.get('photo') ?? 'boulevard';
-  const photoB = photoA === 'boulevard' ? 'pier' : 'boulevard';
-  state.photos[0] = await loadImage(`samples/${photoA}.jpg`);
-  state.photos[1] = await loadImage(`samples/${photoB}.jpg`);
-  state.title = query.get('caption') ?? 'Boulevard Nights';
-  state.subtitle = query.get('subtitle') ?? 'a sunset strip story';
-  state.layout = query.get('layout') ?? 'hero3';
-  state.grade = query.get('grade') ?? 'sunset';
-  state.size = query.get('size') ?? 'wide';
+  const names = (query.get('photos') ?? 'boulevard.jpg,pier.jpg').split(',').map((s) => s.trim()).filter(Boolean);
+  await api.loadSamples(names);
+
+  // Fill every panel with the loaded samples, round-robin, at a natural zoom.
+  const panelCount = layoutPanelsFor(state.layout, 1, 1).length;
+  for (let i = 0; i < panelCount; i++) {
+    state.panels[i] = { photo: i % names.length, zoom: 1, ox: 0, oy: 0 };
+  }
+
+  // Optional per-panel framing: views=0:1,0,0.15;1:1,0,0.5 (panel:zoom,ox,oy), so a shot
+  // can keep the faces in frame instead of the cover-fit's centred crop.
+  const views = query.get('views');
+  if (views) {
+    for (const part of views.split(';')) {
+      const [index, vals] = part.split(':');
+      if (vals === undefined) continue;
+      const [zoom, ox, oy] = vals.split(',').map(Number);
+      const i = Number(index);
+      if (state.panels[i]) {
+        state.panels[i] = { ...state.panels[i], zoom: zoom || 1, ox: ox || 0, oy: oy || 0 };
+      }
+    }
+  }
+
+  await Promise.all([
+    document.fonts.load('60px Anton'),
+    document.fonts.load('60px Pacifico'),
+    document.fonts.load('60px "Bebas Neue"'),
+  ]).catch(() => {});
 
   if (shot === 'cover') {
     document.body.classList.add('shot-cover');
-    const canvas = document.getElementById('cover');
-    const sizes = { square: [1080, 1080], portrait: [1080, 1350], wide: [1920, 1080] };
-    const [w, h] = sizes[state.size] || sizes.wide;
-    canvas.width = w;
-    canvas.height = h;
-    drawCover(canvas, state);
+    const w = Number(query.get('w') ?? 1280);
+    const h = Number(query.get('h') ?? 720);
+    const coverCanvas = document.getElementById('cover');
+    coverCanvas.width = w;
+    coverCanvas.height = h;
+    api.redraw();
   } else {
-    // Editor scene: keep the controls visible, preview at the chosen export size.
-    document.getElementById('title').value = state.title;
-    document.getElementById('subtitle').value = state.subtitle;
-    renderPhotoSlots();
-    syncAll();
-    redrawNow();
+    api.syncControls();
   }
-  requestAnimationFrame(() => requestAnimationFrame(() => { window.__shotReady = true; }));
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  window.__shotReady = true;
 }

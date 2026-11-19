@@ -1,345 +1,341 @@
-// Sunset Strip Cover Studio — wires the editor: photos, layouts, grades, panel drag/zoom,
-// undo/redo, live preview and PNG export. A `?shot=` query sets up a fixed scene for a
-// screenshot instead (./shots.js). Photos are read on this machine and never uploaded.
-import { LAYOUTS, GRADES, SIZES, defaultState, layoutPanels, drawCover, renderExport } from './cover.js';
+// Sunset Strip Cover Studio — wires the editor page: photo slots, layout and grade pickers,
+// caption fields, per-panel crop controls, undo/redo, drag-to-pan, scroll-to-zoom and PNG export.
+// A `?shot=` query hands the page to ./shots.js instead, for fixed screenshot scenes.
+import { drawCover, exportCoverCanvas, GRADES, LAYOUTS, SIZES, layoutPanelsFor, panelAtPoint } from './cover.js';
 import { runShot } from './shots.js';
 
-const $ = (id) => document.getElementById(id);
-const canvas = $('cover');
-const status = $('status');
+const SAMPLES = ['boulevard.jpg', 'pier.jpg'];
+const MAX_PHOTOS = 4;
 
-const state = defaultState();
+const canvas = document.getElementById('cover');
+const statusLine = document.getElementById('status');
+
+/** The whole editable state. Photos live as Images; photoData holds the same pictures as data
+ *  URLs so a state snapshot (for undo) can be stored as plain JSON. */
+const state = {
+  layout: 'hero3',
+  grade: 'vice',
+  size: 'square',
+  title: 'Sunset Strip',
+  subtitle: 'Vice nights, neon lights',
+  kicker: 'Leonida • Est. 2026',
+  badge: 'New',
+  photos: [null, null, null, null],
+  photoData: [null, null, null, null],
+  panels: [
+    { photo: 0, zoom: 1, ox: 0, oy: 0 },
+    { photo: 1, zoom: 1, ox: 0, oy: 0 },
+    { photo: 0, zoom: 1, ox: 0, oy: 0 },
+    { photo: 1, zoom: 1, ox: 0, oy: 0 },
+    { photo: 0, zoom: 1, ox: 0, oy: 0 },
+  ],
+};
+
 let selectedPanel = 0;
-const undoStack = [];
-const redoStack = [];
-let redrawQueued = false;
 
-const SAMPLES = ['samples/boulevard.jpg', 'samples/pier.jpg'];
+// --- history (undo / redo) -------------------------------------------------------
 
-/** Loads an image from a URL, resolving once it can be drawn. */
-export function loadImage(url) {
+const history = [];
+let historyIndex = -1;
+
+function snapshotState() {
+  return JSON.stringify({
+    layout: state.layout, grade: state.grade, size: state.size,
+    title: state.title, subtitle: state.subtitle, kicker: state.kicker, badge: state.badge,
+    photoData: state.photoData, panels: state.panels,
+  });
+}
+
+function pushHistory() {
+  history.length = historyIndex + 1;
+  history.push(snapshotState());
+  if (history.length > 60) history.shift();
+  historyIndex = history.length - 1;
+  refreshUndoButtons();
+}
+
+async function restoreSnapshot(json) {
+  const data = JSON.parse(json);
+  state.layout = data.layout; state.grade = data.grade; state.size = data.size;
+  state.title = data.title; state.subtitle = data.subtitle;
+  state.kicker = data.kicker; state.badge = data.badge;
+  state.panels = data.panels;
+  state.photoData = data.photoData;
+  state.photos = await Promise.all(data.photoData.map((d) => (d ? imageFromDataUrl(d) : null)));
+  syncControls();
+  redraw();
+}
+
+function undo() {
+  if (historyIndex <= 0) return;
+  historyIndex -= 1;
+  restoreSnapshot(history[historyIndex]);
+  refreshUndoButtons();
+  setStatus('Undone.');
+}
+
+function redo() {
+  if (historyIndex >= history.length - 1) return;
+  historyIndex += 1;
+  restoreSnapshot(history[historyIndex]);
+  refreshUndoButtons();
+  setStatus('Redone.');
+}
+
+function refreshUndoButtons() {
+  document.getElementById('undo').disabled = historyIndex <= 0;
+  document.getElementById('redo').disabled = historyIndex >= history.length - 1;
+}
+
+// --- photos ----------------------------------------------------------------------
+
+function imageFromDataUrl(dataUrl) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = reject;
-    img.src = url;
+    img.src = dataUrl;
   });
 }
 
-/** Loads the bundled fonts, then paints; canvas lettering needs the real fonts. */
-async function fontsReady() {
-  try {
-    await Promise.all([
-      document.fonts.load('100px Anton'),
-      document.fonts.load('40px Pacifico'),
-      document.fonts.load('20px "Bebas Neue"'),
-    ]);
-    await document.fonts.ready;
-  } catch {
-    // Fallbacks in the font stacks still paint.
-  }
-}
-
-function snapshot() {
-  const { photos, ...rest } = state;
-  return JSON.stringify(rest);
-}
-function restore(json) {
-  const data = JSON.parse(json);
-  const photos = state.photos;
-  Object.assign(state, data);
-  state.photos = photos;
-}
-function pushUndo() {
-  undoStack.push(snapshot());
-  if (undoStack.length > 60) undoStack.shift();
-  redoStack.length = 0;
-  syncUndoButtons();
-}
-function syncUndoButtons() {
-  $('undo').disabled = undoStack.length === 0;
-  $('redo').disabled = redoStack.length === 0;
-}
-
-function queueRedraw() {
-  if (redrawQueued) return;
-  redrawQueued = true;
-  requestAnimationFrame(() => {
-    redrawQueued = false;
-    drawCover(canvas, state);
-    syncPreviewMeta();
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
 }
-function redrawNow() {
-  drawCover(canvas, state);
-  syncPreviewMeta();
+
+async function setPhotoSlot(slot, dataUrl) {
+  state.photoData[slot] = dataUrl;
+  state.photos[slot] = dataUrl ? await imageFromDataUrl(dataUrl) : null;
+  renderPhotoSlots();
+  redraw();
 }
 
-function syncPreviewMeta() {
-  const size = SIZES[state.size];
-  $('previewMeta').textContent =
-    `${size.label} · ${LAYOUTS[state.layout].label} · ${GRADES[state.grade].label}`;
+async function loadSampleIntoSlot(slot, sampleName) {
+  const res = await fetch(`samples/${sampleName}`);
+  const blob = await res.blob();
+  const dataUrl = await readFileAsDataUrl(blob);
+  await setPhotoSlot(slot, dataUrl);
 }
 
-/** Rebuilds the photo slot thumbnails. */
 function renderPhotoSlots() {
-  const wrap = $('photoSlots');
+  const wrap = document.getElementById('photoSlots');
   wrap.innerHTML = '';
-  state.photos.forEach((img, i) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'photo-slot' + (img ? '' : ' empty');
-    b.title = img ? `Photo ${i + 1} — click to use in the selected panel` : `Photo ${i + 1} — empty`;
-    if (img) b.style.backgroundImage = `url(${img.src})`;
-    b.innerHTML = `<span class="num">${i + 1}</span>` + (img ? '<span class="rm" title="Remove photo">×</span>' : '');
-    b.addEventListener('click', (e) => {
-      if (e.target.classList.contains('rm')) {
-        pushUndo();
-        state.photos[i] = null;
-        renderPhotoSlots();
-        queueRedraw();
-        return;
-      }
-      pushUndo();
-      state.panels[selectedPanel].photo = i;
-      syncPanelEditor();
-      queueRedraw();
+  for (let slot = 0; slot < MAX_PHOTOS; slot++) {
+    const card = document.createElement('div');
+    card.className = 'photo-slot';
+    const thumb = document.createElement('div');
+    thumb.className = 'photo-thumb';
+    if (state.photoData[slot]) {
+      const img = document.createElement('img');
+      img.src = state.photoData[slot];
+      img.alt = `Photo ${slot + 1}`;
+      thumb.appendChild(img);
+    } else {
+      thumb.textContent = `+ Photo ${slot + 1}`;
+    }
+    const pick = document.createElement('label');
+    pick.className = 'slot-button';
+    pick.textContent = 'Choose file';
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.hidden = true;
+    input.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      pushHistory();
+      await setPhotoSlot(slot, await readFileAsDataUrl(file));
+      setStatus(`Photo ${slot + 1} loaded.`);
     });
-    wrap.appendChild(b);
-  });
-}
-
-/** Rebuilds the layout and grade picker buttons. */
-function renderPickers() {
-  const lg = $('layoutGrid');
-  lg.innerHTML = '';
-  for (const [key, def] of Object.entries(LAYOUTS)) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'layout-btn' + (state.layout === key ? ' active' : '');
-    b.textContent = def.label;
-    b.addEventListener('click', () => {
-      if (state.layout === key) return;
-      pushUndo();
-      state.layout = key;
-      selectedPanel = 0;
-      renderPickers();
-      syncPanelEditor();
-      queueRedraw();
+    pick.appendChild(input);
+    const sample = document.createElement('button');
+    sample.type = 'button';
+    sample.className = 'slot-button';
+    sample.textContent = 'Use sample';
+    sample.addEventListener('click', async () => {
+      pushHistory();
+      await loadSampleIntoSlot(slot, SAMPLES[slot % SAMPLES.length]);
+      setStatus(`Sample photo loaded into slot ${slot + 1}.`);
     });
-    lg.appendChild(b);
-  }
-  const gg = $('gradeGrid');
-  gg.innerHTML = '';
-  for (const [key, def] of Object.entries(GRADES)) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'grade-btn' + (state.grade === key ? ' active' : '');
-    const cols = def.title;
-    b.innerHTML = `<span class="swatch" style="background:linear-gradient(90deg,${cols[0]},${cols[1]},${cols[2]})"></span>${def.label}`;
-    b.addEventListener('click', () => {
-      if (state.grade === key) return;
-      pushUndo();
-      state.grade = key;
-      renderPickers();
-      queueRedraw();
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'slot-button';
+    clear.textContent = 'Clear';
+    clear.disabled = !state.photoData[slot];
+    clear.addEventListener('click', async () => {
+      pushHistory();
+      await setPhotoSlot(slot, null);
     });
-    gg.appendChild(b);
+    card.append(thumb, pick, sample, clear);
+    wrap.appendChild(card);
   }
 }
 
-/** Syncs the selected-panel editor (photo select + sliders) with the state. */
-function syncPanelEditor() {
-  const count = LAYOUTS[state.layout].panels;
-  const p = state.panels[selectedPanel];
-  const sel = $('panelPhoto');
-  sel.innerHTML = '';
-  state.photos.forEach((img, i) => {
-    const o = document.createElement('option');
-    o.value = String(i);
-    o.textContent = img ? `Photo ${i + 1}` : `Photo ${i + 1} (empty)`;
-    sel.appendChild(o);
-  });
-  sel.value = String(p.photo);
-  $('panelZoom').value = String(p.zoom);
-  $('panelCx').value = String(p.cx);
-  $('panelCy').value = String(p.cy);
-  $('zoomVal').textContent = `${p.zoom.toFixed(2)}×`;
-  $('cxVal').textContent = `${Math.round(p.cx * 100)}%`;
-  $('cyVal').textContent = `${Math.round(p.cy * 100)}%`;
-  $('panelHint').textContent =
-    `Panel ${selectedPanel + 1} of ${count} selected — drag it in the preview to move the photo.`;
-}
+// --- controls --------------------------------------------------------------------
 
-/** Applies a text/checkbox/select control change as one undo step. */
-function bindControl(id, apply) {
-  $(id).addEventListener('change', () => { pushUndo(); apply(); queueRedraw(); });
-}
-function bindText(id, key) {
-  $(id).addEventListener('input', () => { state[key] = $(id).value; queueRedraw(); });
-  $(id).addEventListener('change', () => { pushUndo(); });
-}
-
-$('title').addEventListener('input', () => { state.title = $('title').value; queueRedraw(); });
-$('subtitle').addEventListener('input', () => { state.subtitle = $('subtitle').value; queueRedraw(); });
-$('badge').addEventListener('input', () => { state.badge = $('badge').value; queueRedraw(); });
-bindControl('titleStyle', () => { state.titleStyle = $('titleStyle').value; });
-bindControl('grain', () => { state.grain = $('grain').checked; });
-bindControl('vignette', () => { state.vignette = $('vignette').checked; });
-bindControl('frame', () => { state.frame = $('frame').checked; });
-bindControl('exportSize', () => {
-  state.size = $('exportSize').value;
-  const s = SIZES[state.size];
-  canvas.width = s.w;
-  canvas.height = s.h;
-  queueRedraw();
-});
-
-$('panelPhoto').addEventListener('change', () => {
-  pushUndo();
-  state.panels[selectedPanel].photo = Number($('panelPhoto').value);
-  queueRedraw();
-});
-$('panelZoom').addEventListener('input', () => {
-  state.panels[selectedPanel].zoom = Number($('panelZoom').value);
-  syncPanelEditor();
-  queueRedraw();
-});
-$('panelZoom').addEventListener('change', pushUndo);
-$('panelCx').addEventListener('input', () => {
-  state.panels[selectedPanel].cx = Number($('panelCx').value);
-  syncPanelEditor();
-  queueRedraw();
-});
-$('panelCx').addEventListener('change', pushUndo);
-$('panelCy').addEventListener('input', () => {
-  state.panels[selectedPanel].cy = Number($('panelCy').value);
-  syncPanelEditor();
-  queueRedraw();
-});
-$('panelCy').addEventListener('change', pushUndo);
-$('fillAll').addEventListener('click', () => {
-  pushUndo();
-  const photo = state.panels[selectedPanel].photo;
-  state.panels.forEach((p) => { p.photo = photo; });
-  queueRedraw();
-  status.textContent = `Every panel now uses photo ${photo + 1}.`;
-});
-
-/** Reads files into photo slots, left to right. */
-async function addFiles(files) {
-  const list = [...files].filter((f) => f.type.startsWith('image/'));
-  if (!list.length) return;
-  pushUndo();
-  for (const file of list) {
-    const slot = state.photos.findIndex((p) => p === null);
-    if (slot === -1) break;
-    state.photos[slot] = await loadImage(URL.createObjectURL(file));
+function buildPicker(containerId, items, current, onPick) {
+  const wrap = document.getElementById(containerId);
+  wrap.innerHTML = '';
+  for (const item of items) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'picker-button';
+    button.textContent = item.name;
+    button.dataset.id = item.id;
+    if (item.id === current) button.classList.add('active');
+    if (item.id === 'vice' || item.id === 'neon') button.style.setProperty('--swatch', item.id === 'vice' ? '#ff5e8a' : '#37e6ff');
+    button.addEventListener('click', () => {
+      onPick(item.id);
+      wrap.querySelectorAll('.picker-button').forEach((b) => b.classList.toggle('active', b.dataset.id === item.id));
+    });
+    wrap.appendChild(button);
   }
+}
+
+function buildLayoutPicker() {
+  buildPicker('layoutPicker', LAYOUTS, state.layout, (id) => { pushHistory(); state.layout = id; redraw(); });
+}
+
+function buildGradePicker() {
+  buildPicker('gradePicker', GRADES, state.grade, (id) => { pushHistory(); state.grade = id; redraw(); });
+}
+
+function buildSizePicker() {
+  const wrap = document.getElementById('sizePicker');
+  wrap.innerHTML = '';
+  for (const [id, size] of Object.entries(SIZES)) {
+    const label = document.createElement('label');
+    label.className = 'size-option';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'size';
+    radio.value = id;
+    radio.checked = id === state.size;
+    radio.addEventListener('change', () => { pushHistory(); state.size = id; resizePreview(); });
+    label.append(radio, document.createTextNode(` ${size.label}`));
+    wrap.appendChild(label);
+  }
+}
+
+function syncControls() {
+  document.getElementById('titleInput').value = state.title;
+  document.getElementById('subtitleInput').value = state.subtitle;
+  document.getElementById('kickerInput').value = state.kicker;
+  document.getElementById('badgeInput').value = state.badge;
+  buildLayoutPicker();
+  buildGradePicker();
+  buildSizePicker();
   renderPhotoSlots();
-  queueRedraw();
-  status.textContent = `${list.length} photo${list.length > 1 ? 's' : ''} loaded — click a photo slot to put it in the selected panel.`;
+  refreshPanelControls();
+  resizePreview();
 }
-$('addPhoto').addEventListener('click', () => $('photoInput').click());
-$('photoInput').addEventListener('change', (e) => addFiles(e.target.files));
-$('loadSamples').addEventListener('click', async () => {
-  pushUndo();
-  for (let i = 0; i < SAMPLES.length; i++) {
-    state.photos[i] = await loadImage(SAMPLES[i]);
-  }
-  renderPhotoSlots();
-  queueRedraw();
-  status.textContent = 'Sample photos loaded — try the layouts and grades.';
-});
 
-/** Pointer drag on the preview: pick a panel, drag to pan its photo, wheel to zoom. */
-function panelAt(clientX, clientY) {
-  const r = canvas.getBoundingClientRect();
-  const px = ((clientX - r.left) / r.width) * canvas.width;
-  const py = ((clientY - r.top) / r.height) * canvas.height;
-  const rects = layoutPanels(state.layout, canvas.width, canvas.height);
-  const count = LAYOUTS[state.layout].panels;
-  for (let i = count - 1; i >= 0; i--) {
-    const q = rects[i];
-    if (px >= q.x && px <= q.x + q.w && py >= q.y && py <= q.y + q.h) return i;
+function refreshPanelControls() {
+  const panelCount = layoutPanelsFor(state.layout, 1, 1).length;
+  if (selectedPanel >= panelCount) selectedPanel = 0;
+  const select = document.getElementById('panelSelect');
+  select.innerHTML = '';
+  for (let i = 0; i < panelCount; i++) {
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = `Panel ${i + 1}`;
+    select.appendChild(opt);
   }
-  return -1;
+  select.value = String(selectedPanel);
+  const photoSelect = document.getElementById('panelPhoto');
+  photoSelect.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = '-1';
+  none.textContent = 'Empty';
+  photoSelect.appendChild(none);
+  for (let s = 0; s < MAX_PHOTOS; s++) {
+    const opt = document.createElement('option');
+    opt.value = String(s);
+    opt.textContent = state.photoData[s] ? `Photo ${s + 1}` : `Photo ${s + 1} (empty)`;
+    photoSelect.appendChild(opt);
+  }
+  photoSelect.value = String(state.panels[selectedPanel].photo);
+  const zoom = document.getElementById('panelZoom');
+  zoom.value = String(state.panels[selectedPanel].zoom);
+  document.getElementById('zoomValue').textContent = `${Math.round(state.panels[selectedPanel].zoom * 100)}%`;
 }
+
+// --- drawing ---------------------------------------------------------------------
+
+function resizePreview() {
+  const size = SIZES[state.size];
+  canvas.width = size.w;
+  canvas.height = size.h;
+  redraw();
+}
+
+function redraw() {
+  drawCover(canvas, state);
+}
+
+function setStatus(text) {
+  statusLine.textContent = text;
+}
+
+// --- panel drag / zoom on the canvas ----------------------------------------------
+
+function canvasPoint(event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+    y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+  };
+}
+
 let drag = null;
-canvas.addEventListener('pointerdown', (e) => {
-  const i = panelAt(e.clientX, e.clientY);
-  if (i < 0) return;
-  if (i !== selectedPanel) {
-    selectedPanel = i;
-    syncPanelEditor();
-  }
-  canvas.setPointerCapture(e.pointerId);
-  canvas.classList.add('dragging');
-  drag = { x: e.clientX, y: e.clientY, undoPushed: false };
+let wheelBurst = false;
+
+canvas.addEventListener('pointerdown', (event) => {
+  const p = canvasPoint(event);
+  const hit = panelAtPoint(state.layout, p.x, p.y, canvas.width, canvas.height);
+  if (hit < 0) return;
+  pushHistory();
+  selectedPanel = hit;
+  refreshPanelControls();
+  const view = state.panels[hit];
+  drag = { panel: hit, startX: p.x, startY: p.y, ox: view.ox, oy: view.oy };
+  canvas.setPointerCapture(event.pointerId);
 });
-canvas.addEventListener('pointermove', (e) => {
+
+canvas.addEventListener('pointermove', (event) => {
   if (!drag) return;
-  if (!drag.undoPushed) { pushUndo(); drag.undoPushed = true; }
-  const r = canvas.getBoundingClientRect();
-  const p = state.panels[selectedPanel];
-  const rects = layoutPanels(state.layout, canvas.width, canvas.height);
-  const q = rects[selectedPanel];
-  const iw = state.photos[p.photo]?.naturalWidth || 1;
-  const ih = state.photos[p.photo]?.naturalHeight || 1;
-  const scale = Math.max(q.w / iw, q.h / ih) * p.zoom;
-  p.cx -= ((e.clientX - drag.x) / r.width) * (canvas.width / (iw * scale));
-  p.cy -= ((e.clientY - drag.y) / r.height) * (canvas.height / (ih * scale));
-  p.cx = Math.min(1, Math.max(0, p.cx));
-  p.cy = Math.min(1, Math.max(0, p.cy));
-  drag.x = e.clientX;
-  drag.y = e.clientY;
-  syncPanelEditor();
-  queueRedraw();
+  const p = canvasPoint(event);
+  const panels = layoutPanelsFor(state.layout, canvas.width, canvas.height);
+  const rect = panels[drag.panel];
+  const view = state.panels[drag.panel];
+  view.ox = Math.max(-0.6, Math.min(0.6, drag.ox + (p.x - drag.startX) / rect.w));
+  view.oy = Math.max(-0.6, Math.min(0.6, drag.oy + (p.y - drag.startY) / rect.h));
+  redraw();
 });
-canvas.addEventListener('pointerup', () => { drag = null; canvas.classList.remove('dragging'); });
-canvas.addEventListener('wheel', (e) => {
-  const i = panelAt(e.clientX, e.clientY);
-  if (i < 0) return;
-  e.preventDefault();
-  if (i !== selectedPanel) { selectedPanel = i; syncPanelEditor(); }
-  pushUndo();
-  const p = state.panels[selectedPanel];
-  p.zoom = Math.min(3, Math.max(1, p.zoom * (e.deltaY < 0 ? 1.08 : 0.93)));
-  syncPanelEditor();
-  queueRedraw();
+
+canvas.addEventListener('pointerup', () => { drag = null; });
+
+canvas.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  const p = canvasPoint(event);
+  const hit = panelAtPoint(state.layout, p.x, p.y, canvas.width, canvas.height);
+  if (hit < 0) return;
+  if (!wheelBurst) { pushHistory(); wheelBurst = true; setTimeout(() => { wheelBurst = false; }, 400); }
+  const view = state.panels[hit];
+  view.zoom = Math.max(1, Math.min(4, view.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
+  selectedPanel = hit;
+  refreshPanelControls();
+  redraw();
 }, { passive: false });
 
-$('undo').addEventListener('click', () => {
-  if (!undoStack.length) return;
-  redoStack.push(snapshot());
-  restore(undoStack.pop());
-  syncAll();
-});
-$('redo').addEventListener('click', () => {
-  if (!redoStack.length) return;
-  undoStack.push(snapshot());
-  restore(redoStack.pop());
-  syncAll();
-});
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); $('undo').click(); }
-  if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); $('redo').click(); }
-});
-$('reset').addEventListener('click', () => {
-  pushUndo();
-  const fresh = defaultState();
-  const photos = state.photos;
-  Object.assign(state, fresh);
-  state.photos = photos;
-  $('title').value = state.title;
-  $('subtitle').value = state.subtitle;
-  $('badge').value = state.badge;
-  syncAll();
-  status.textContent = 'Cover reset — your photos are still loaded.';
-});
+// --- export ----------------------------------------------------------------------
 
-function downloadCanvas(c, filename) {
-  c.toBlob((blob) => {
+function downloadCanvas(exportCanvas, filename) {
+  exportCanvas.toBlob((blob) => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
@@ -347,48 +343,98 @@ function downloadCanvas(c, filename) {
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   }, 'image/png');
 }
-$('export').addEventListener('click', async () => {
-  await fontsReady();
-  const c = renderExport(state, state.size);
-  const s = SIZES[state.size];
-  downloadCanvas(c, `sunset-strip-cover-${s.w}x${s.h}.png`);
-  status.textContent = `Saved sunset-strip-cover-${s.w}x${s.h}.png`;
+
+function exportOne(sizeId) {
+  const size = SIZES[sizeId];
+  const out = exportCoverCanvas(state, size.w, size.h);
+  downloadCanvas(out, `sunset-strip-${size.w}x${size.h}.png`);
+  setStatus(`Saved sunset-strip-${size.w}x${size.h}.png`);
+}
+
+document.getElementById('exportOne').addEventListener('click', () => exportOne(state.size));
+document.getElementById('exportAll').addEventListener('click', () => {
+  Object.keys(SIZES).forEach((id, i) => setTimeout(() => exportOne(id), i * 400));
+  setStatus('Exporting all three sizes…');
 });
-$('exportAll').addEventListener('click', async () => {
-  await fontsReady();
-  for (const key of Object.keys(SIZES)) {
-    const c = renderExport(state, key);
-    const s = SIZES[key];
-    downloadCanvas(c, `sunset-strip-cover-${s.w}x${s.h}.png`);
+
+// --- misc buttons ------------------------------------------------------------------
+
+document.getElementById('undo').addEventListener('click', undo);
+document.getElementById('redo').addEventListener('click', redo);
+document.getElementById('fillAll').addEventListener('click', () => {
+  pushHistory();
+  const count = layoutPanelsFor(state.layout, 1, 1).length;
+  const loaded = state.photoData.map((d, i) => (d ? i : -1)).filter((i) => i >= 0);
+  for (let i = 0; i < count; i++) {
+    state.panels[i].photo = loaded.length ? loaded[i % loaded.length] : -1;
+    state.panels[i].zoom = 1; state.panels[i].ox = 0; state.panels[i].oy = 0;
   }
-  status.textContent = 'Saved all 3 sizes — 1080×1080, 1080×1350 and 1920×1080.';
+  refreshPanelControls();
+  redraw();
+  setStatus('Every panel filled.');
+});
+document.getElementById('resetView').addEventListener('click', () => {
+  pushHistory();
+  const view = state.panels[selectedPanel];
+  view.zoom = 1; view.ox = 0; view.oy = 0;
+  refreshPanelControls();
+  redraw();
 });
 
-function syncAll() {
-  renderPhotoSlots();
-  renderPickers();
-  syncPanelEditor();
-  $('grain').checked = state.grain;
-  $('vignette').checked = state.vignette;
-  $('frame').checked = state.frame;
-  $('titleStyle').value = state.titleStyle;
-  $('exportSize').value = state.size;
-  const s = SIZES[state.size];
-  canvas.width = s.w;
-  canvas.height = s.h;
-  syncUndoButtons();
-  queueRedraw();
+document.getElementById('panelSelect').addEventListener('change', (e) => {
+  selectedPanel = Number(e.target.value);
+  refreshPanelControls();
+});
+document.getElementById('panelPhoto').addEventListener('change', (e) => {
+  pushHistory();
+  state.panels[selectedPanel].photo = Number(e.target.value);
+  redraw();
+});
+document.getElementById('panelZoom').addEventListener('input', (e) => {
+  state.panels[selectedPanel].zoom = Number(e.target.value);
+  document.getElementById('zoomValue').textContent = `${Math.round(state.panels[selectedPanel].zoom * 100)}%`;
+  redraw();
+});
+document.getElementById('panelZoom').addEventListener('change', pushHistory);
+
+for (const [inputId, key] of [['titleInput', 'title'], ['subtitleInput', 'subtitle'], ['kickerInput', 'kicker'], ['badgeInput', 'badge']]) {
+  const input = document.getElementById(inputId);
+  input.addEventListener('input', () => { state[key] = input.value; redraw(); });
+  input.addEventListener('change', pushHistory);
 }
 
-/** Entry point: shot scenes for screenshots, otherwise the live editor. */
-const query = new URLSearchParams(location.search);
-const shot = query.get('shot');
-if (shot) {
-  runShot(shot, query, state, { loadImage, fontsReady, renderPhotoSlots, syncAll, redrawNow, SAMPLES });
-} else {
-  (async () => {
-    await fontsReady();
-    syncAll();
-    redrawNow();
-  })();
+document.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+    event.preventDefault(); undo();
+  } else if ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === 'y' || (event.key.toLowerCase() === 'z' && event.shiftKey))) {
+    event.preventDefault(); redo();
+  }
+});
+
+// --- boot --------------------------------------------------------------------------
+
+async function boot() {
+  // The shot scenes (for screenshots) take over before the editor wires itself up.
+  const shot = new URLSearchParams(location.search).get('shot');
+  if (shot) {
+    await runShot(shot, new URLSearchParams(location.search), {
+      state,
+      async loadSample(name) { return loadSampleIntoSlot(0, name); },
+      async loadSamples(names) {
+        for (let i = 0; i < names.length; i++) await loadSampleIntoSlot(i, names[i]);
+      },
+      resizePreview, redraw, renderPhotoSlots, syncControls,
+    });
+    return;
+  }
+  await Promise.all([
+    document.fonts.load('40px Anton'),
+    document.fonts.load('40px Pacifico'),
+    document.fonts.load('40px "Bebas Neue"'),
+  ]).catch(() => {});
+  syncControls();
+  pushHistory();
+  document.fonts.ready.then(redraw);
 }
+
+boot();
